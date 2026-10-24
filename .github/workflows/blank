@@ -1,0 +1,69 @@
+name: RDP-Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Remove and recreate firewall rule for RDP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          Restart-Service -Name TermService -Force
+
+      - name: Create Temporary RDP User
+        run: |
+          $charSet = @{
+              Upper  = [char[]](65..90)
+              Lower  = [char[]](97..122)
+              Number = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64))
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 3
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 3
+          $rawPassword += $charSet.Special | Get-Random -Count 2
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+          
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          version: latest
+
+      - name: Output Connection Info & Maintain Session
+        run: |
+          Write-Host "`n=================================================="
+          Write-Host " RDP IS READY TO CONNECT!"
+          Write-Host "--------------------------------------------------"
+          Write-Host " Username: RDPUser"
+          Write-Host " Password: $env:RDP_PASSWORD"
+          Write-Host " Check your Tailscale admin console for the IP."
+          Write-Host "==================================================`n"
+
+          # Keep session running indefinitely until workflow is cancelled
+          while ($true) {
+              Start-Sleep -Seconds 60
+          }
+          
